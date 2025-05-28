@@ -48,11 +48,12 @@ Done
 """
 
 __title__ = "EasyAlias"
-__author__ = "TheMarkster"
+__author__ = "TheMarkster and rosta"
 __url__ = "https://wiki.freecadweb.org/Macro_EasyAlias"
 __Wiki__ = "https://wiki.freecadweb.org/Macro_EasyAlias"
-__date__ = "2022.07.31" #year.month.date
+__date__ = "2024.12.24" #year.month.date
 __version__ = __date__
+__icon__ = "https://www.freecadweb.org/wiki/images/5/5e/Easy-alias-icon.png"
 
 CELL_ADDR_RE = re.compile(r"([A-Za-z]+)([1-9]\d*)")
 CUSTOM_ALIAS_RE = re.compile(r".*\((.*)\)")
@@ -66,7 +67,8 @@ REPLACEMENTS = {
     "Ä": "Ae",
     "Ö": "Oe",
     "Ü": "Ue",
-    "ß": "ss"
+    "ß": "ss",
+    "'": ""
 }
 
 def getSpreadsheets():
@@ -84,6 +86,16 @@ def getSpreadsheets():
             linkedObject = selectedObject.LinkedObject
             if linkedObject.TypeId == 'Spreadsheet::Sheet':
                 spreadsheets.add(linkedObject)
+    if spreadsheets:
+        return spreadsheets
+    else:
+        # check if there is only one spreadsheet and use that one if none are selected
+        doc = FreeCAD.ActiveDocument
+        if not doc:
+            return spreadsheets
+        all_spreadsheets = [obj for obj in doc.Objects if obj.isDerivedFrom("Spreadsheet::Sheet")]
+        if len(all_spreadsheets) == 1:
+            return set(all_spreadsheets)
     return spreadsheets
 
 # The original implementatin of a1_to_rowcol and rowcol_to_a1 can be found here:
@@ -155,20 +167,65 @@ def main():
             "No spreadsheet selected.\nPlease select a spreadsheet in the tree view.")
         return
     for spreadsheet in spreadsheets:
-        for selectedCell in spreadsheet.ViewObject.getView().selectedCells():
-            contents = spreadsheet.getContents(selectedCell)
-            if contents:
-                alias = textToAlias(contents)
-                row, column = a1_to_rowcol(selectedCell)
-                nextCell = rowcol_to_a1(row, column + 1)
+        selected_cells = spreadsheet.ViewObject.getView().selectedCells()
+        if not selected_cells:
+            QtGui.QMessageBox.critical(None, "Error",
+                "No cells selected.\nPlease select at least one cell.")
+            return
+
+        # Parse all selected cells into (row, col) and find min row and min col
+        cell_indices = [a1_to_rowcol(cell) + (cell,) for cell in selected_cells]
+        if not cell_indices:
+            QtGui.QMessageBox.critical(None, "Error",
+                "No valid cells selected.")
+            return
+
+        min_row = min(row for row, col, cell in cell_indices)
+        min_col = min(col for row, col, cell in cell_indices)
+
+        # Header cells: all selected cells in the header row (min_row)
+        header_cells = [(cell, col) for row, col, cell in cell_indices if row == min_row]
+        # Value cells: all selected cells in the leftmost selected column (min_col), but not in header row
+        value_cells = [(cell, row) for row, col, cell in cell_indices if col == min_col and row != min_row]
+
+        if header_cells and value_cells:
+            # Table mode: assign {A value}_{header} to each cell in the row
+            headers = {}
+            for cell, col in header_cells:
+                header_text = spreadsheet.getContents(cell)
+                headers[col] = textToAlias(header_text)
+            for value_cell, value_row in value_cells:
+                value = spreadsheet.getContents(value_cell)
+                value_alias = textToAlias(value)
+                for col in headers:
+                    if col == min_col:
+                        continue  # skip the value column itself
+                    target_cell = rowcol_to_a1(value_row, col)
+                    alias = f"{value_alias}_{headers[col]}"
+                    try:
+                        spreadsheet.setAlias(target_cell, alias)
+                    except Exception as e:
+                        QtGui.QMessageBox.critical(None, "Error",
+                            f"Unable to set alias <i>{alias}</i> at cell {target_cell} "
+                            f"<br>in spreadsheet <i>{spreadsheet.FullName}</i>.<br><br>"
+                            "<b>Remember, aliases cannot begin with a numeral or an underscore or contain any invalid characters.</b>")
+        elif value_cells:
+            # Original mode: assign alias from value cell to cell to its right
+            for value_cell, value_row in value_cells:
+                value = spreadsheet.getContents(value_cell)
+                value_alias = textToAlias(value)
+                target_cell = rowcol_to_a1(value_row, min_col + 1)
                 try:
-                    spreadsheet.setAlias(nextCell, alias)
-                except:
+                    spreadsheet.setAlias(target_cell, value_alias)
+                except Exception as e:
                     QtGui.QMessageBox.critical(None, "Error",
-                        "Unable to set alias <i>" + alias + "</i> at cell " + nextCell +
-                        "<br>in spreadsheet <i>" + spreadsheet.FullName + "</i>." +
-                        "<br><br><b>Remember, aliases cannot begin with a numeral or an " +
-                        "underscore or contain any invalid characters.</b>")
+                        f"Unable to set alias <i>{value_alias}</i> at cell {target_cell} "
+                        f"<br>in spreadsheet <i>{spreadsheet.FullName}</i>.<br><br>"
+                        "<b>Remember, aliases cannot begin with a numeral or an underscore or contain any invalid characters.</b>")
+        else:
+            QtGui.QMessageBox.critical(None, "Error",
+                "Please select at least one cell in the leftmost column, or the header row and value cells.")
+            return
 
     App.ActiveDocument.recompute()
 
